@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- Added jcode detection with idle, working, and blocked screen states.
 - Added `ui.pane_scrollbars = false` to hide terminal pane scrollbars and reclaim their reserved column.
 - Added `ui.tab_bar_position = "bottom"` to place the desktop tab row below terminal panes.
 
