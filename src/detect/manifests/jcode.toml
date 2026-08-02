@@ -1,0 +1,87 @@
+id = "jcode"
+version = "2026.08.01.1"
+min_engine_version = 1
+updated_at = "2026-08-01T00:00:00Z"
+
+# Jcode draws a single composer prompt row at the bottom of the screen. The row
+# is "<n><prompt-char> <input>", where <n> is the next prompt number and the
+# prompt character encodes state: "> " (or "» " for an active skill, "$ " in
+# shell mode) when jcode is idle and waiting, and "… " while a turn is
+# processing. When a turn runs, jcode also paints an activity status line just
+# above the composer: a leading braille spinner cell ("⠋…⠏") for thinking and
+# streaming, or a "··● tool ●··" bar while a tool runs.
+#
+# Blocked states come from jcode's interactive login flow, which intercepts the
+# next input to collect an API key, API base, or OAuth callback/authorization
+# code. Each prompt renders a "type /cancel to abort" instruction and a
+# "Login: …"/"Login [account]: …" status notice above the composer. Jcode sets
+# its process title with proctitle rather than an OSC terminal title, so these
+# screen rules are the only detection evidence.
+
+# --- Blocked: interactive login prompts waiting for pasted input ---
+
+[[rules]]
+id = "login_input_prompt"
+state = "blocked"
+priority = 980
+region = "whole_recent"
+visible_blocker = true
+contains = ["type /cancel to abort"]
+any = [
+  { contains = ["paste your api key below"] },
+  { contains = ["paste the full callback url"] },
+  { contains = ["paste the callback url or authorization code"] },
+  { contains = ["paste the api base below"] },
+  { contains = ["enter your azure openai endpoint"] },
+  { contains = ["waiting for authorization"] },
+]
+
+[[rules]]
+id = "login_status_notice"
+state = "blocked"
+priority = 970
+region = "bottom_non_empty_lines(6)"
+visible_blocker = true
+line_regex = ['(?i)^login(?: \[[^\]]+\])?: (?:paste|waiting|antigravity)']
+
+# --- Working: turn is processing ---
+
+# The composer prompt character switches to "… " (U+2026) while a turn runs.
+# This is the single most reliable working signal because it is present for
+# thinking, streaming, and tool execution alike.
+[[rules]]
+id = "processing_prompt"
+state = "working"
+priority = 900
+region = "bottom_non_empty_lines(1)"
+visible_working = true
+line_regex = ['^\d+\x{2026} ']
+
+# Reinforce with the activity status line jcode paints above the composer: a
+# leading braille spinner cell, or the "··● tool ●··" running-tool bar.
+[[rules]]
+id = "activity_status_line"
+state = "working"
+priority = 890
+region = "bottom_non_empty_lines(4)"
+visible_working = true
+any = [
+  { line_regex = ['^[\x{2800}-\x{28FF}] '] },
+  { line_regex = ['^\x{00B7}*\x{25CF} .+ \x{25CF}\x{00B7}*'] },
+]
+
+# --- Idle: composer prompt visible, no turn running ---
+
+# The bottom composer row shows the plain prompt character ("> ", "» ", or
+# "$ ") when jcode is idle. The not-gate keeps this from firing on the
+# processing prompt.
+[[rules]]
+id = "composer_prompt_idle"
+state = "idle"
+priority = 840
+region = "bottom_non_empty_lines(1)"
+visible_idle = true
+line_regex = ['^\d+[>\x{00BB}$] ']
+not = [
+  { line_regex = ['^\d+\x{2026} '] },
+]

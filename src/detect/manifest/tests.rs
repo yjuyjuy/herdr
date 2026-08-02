@@ -360,6 +360,79 @@ fn devin_manifest_detects_idle_working_and_blocked_states() {
 }
 
 #[test]
+fn jcode_manifest_detects_idle_working_and_blocked_states() {
+    // Captured from a live jcode v0.64.2 TUI at 120x40. The bottom composer row
+    // shows the plain "> " prompt with the next prompt number when idle.
+    let idle = explain(
+        Agent::Jcode,
+        " Counted 1 to 30, one per line.\n   13s · 99.1 tps · ↑117 ↓16\n2> ",
+    );
+    assert_eq!(idle.state, AgentState::Idle);
+    assert_eq!(
+        idle.matched_rule.as_ref().map(|rule| rule.id.as_str()),
+        Some("composer_prompt_idle")
+    );
+    assert!(idle.visible_idle);
+
+    // While a turn is thinking/streaming, the prompt character switches to
+    // "… " and jcode paints a braille spinner status line above the composer.
+    let working_thinking = explain(
+        Agent::Jcode,
+        " 1› Count slowly from 1 to 30.\n\n I'll count\n⠸ 1s · https\n2… ",
+    );
+    assert_eq!(working_thinking.state, AgentState::Working);
+    assert_eq!(
+        working_thinking
+            .matched_rule
+            .as_ref()
+            .map(|rule| rule.id.as_str()),
+        Some("processing_prompt")
+    );
+    assert!(working_thinking.visible_working);
+
+    // The running-tool status bar "··● tool ●··" is also a working signal.
+    let working_tool = explain(
+        Agent::Jcode,
+        " I'll count from 1 to 30 with a pause between each.\n··● bash ●·· · $ for i in $(seq 1 30); do echo $i; sleep 0.3; done · https · 3s · Alt+B bg\n2… ",
+    );
+    assert_eq!(working_tool.state, AgentState::Working);
+    assert!(working_tool.visible_working);
+
+    // Interactive API-key login prompt intercepts the next input and is a
+    // genuine blocked state.
+    let blocked_api_key = explain(
+        Agent::Jcode,
+        " Paste your API key below (it will be saved securely), or type /cancel to abort.\nLogin: paste key...\n2> ",
+    );
+    assert_eq!(blocked_api_key.state, AgentState::Blocked);
+    assert_eq!(
+        blocked_api_key
+            .matched_rule
+            .as_ref()
+            .map(|rule| rule.id.as_str()),
+        Some("login_input_prompt")
+    );
+    assert!(blocked_api_key.visible_blocker);
+
+    // The OAuth prompt wraps its "Type /cancel to abort" instruction across a
+    // line break, so the "Login [account]: waiting..." status notice carries
+    // the blocked classification on its own.
+    let blocked_oauth = explain(
+        Agent::Jcode,
+        " Or paste the full callback URL or authorization code here to finish from another device. Type /cancel to\n abort.\n\nLogin [claude-1]: waiting...\n2> ",
+    );
+    assert_eq!(blocked_oauth.state, AgentState::Blocked);
+    assert_eq!(
+        blocked_oauth
+            .matched_rule
+            .as_ref()
+            .map(|rule| rule.id.as_str()),
+        Some("login_status_notice")
+    );
+    assert!(blocked_oauth.visible_blocker);
+}
+
+#[test]
 fn manifest_validation_rejects_unknown_fields_empty_rules_invalid_regions_and_regexes() {
     assert!(parse_manifest(
         r#"
