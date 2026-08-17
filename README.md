@@ -79,6 +79,15 @@ just test        # unit tests
 just check       # formatting, tests, and maintenance checks
 ```
 
+## fork improvements
+
+This is a fork of [herdrdev/herdr](https://github.com/herdrdev/herdr), maintained at [yjuyjuy/herdr](https://github.com/yjuyjuy/herdr).
+It adds the following on top of upstream.
+
+- **Jcode agent support** with screen-based detection of idle, working, and blocked login states.
+- **Fork build identity** that stamps a fork-suffixed version so the firstmate installer can pin binaries.
+- **Fork release pipeline** that builds all four platform binaries and cuts prereleases under non-colliding tags.
+
 ## license
 
 Herdr is licensed under the [Apache License 2.0](LICENSE).
