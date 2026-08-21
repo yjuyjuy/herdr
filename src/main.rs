@@ -100,6 +100,7 @@ mod terminal_notify;
 mod terminal_theme;
 mod ui;
 mod update;
+mod update_source;
 mod workspace;
 mod worktree;
 

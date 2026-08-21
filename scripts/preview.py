@@ -19,6 +19,7 @@ EXPECTED_ASSET_NAMES = {
     **{target: f"herdr-{target}" for target in ASSET_TARGETS},
     "windows-x86_64": "herdr-windows-x86_64.zip",
 }
+DEFAULT_RELEASE_REPO = "yjuyjuy/herdr"
 HIDDEN_SUBJECTS = (
     "docs: update website manifest",
     "docs: update preview manifest",
@@ -299,13 +300,13 @@ def main() -> int:
     notes.add_argument("--commit", required=True)
     notes.add_argument("--build-id", required=True)
     notes.add_argument("--base-version", required=True)
-    notes.add_argument("--repo", default="herdrdev/herdr")
+    notes.add_argument("--repo", default=DEFAULT_RELEASE_REPO)
     notes.add_argument("--output", required=True)
     notes.set_defaults(func=cmd_notes)
 
     manifest = sub.add_parser("manifest")
     manifest.add_argument("--output", default="website/preview.json")
-    manifest.add_argument("--repo", default="herdrdev/herdr")
+    manifest.add_argument("--repo", default=DEFAULT_RELEASE_REPO)
     manifest.add_argument("--tag", required=True)
     manifest.add_argument("--build-id", required=True)
     manifest.add_argument("--commit", required=True)
