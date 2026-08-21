@@ -23,8 +23,6 @@ use std::time::{Duration, Instant};
 use interprocess::local_socket::traits::Stream as _;
 use serde::{Deserialize, Deserializer};
 
-const STABLE_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/latest.json";
-const PREVIEW_UPDATE_MANIFEST_URL: &str = "https://herdr.dev/preview.json";
 const HOMEBREW_FORMULA_API_URL: &str = "https://formulae.brew.sh/api/formula/herdr.json";
 const HERDR_UPDATE_COMMAND: &str = "herdr update";
 const HOMEBREW_UPDATE_COMMAND: &str = "brew update && brew upgrade herdr";
@@ -285,11 +283,11 @@ impl ReleaseInfo {
 }
 
 fn fetch_update_manifest() -> Result<UpdateManifest, String> {
-    fetch_json_manifest(STABLE_UPDATE_MANIFEST_URL)
+    fetch_json_manifest(&crate::update_source::stable_manifest_url())
 }
 
 fn fetch_preview_manifest() -> Result<PreviewManifest, String> {
-    fetch_json_manifest(PREVIEW_UPDATE_MANIFEST_URL)
+    fetch_json_manifest(&crate::update_source::preview_manifest_url())
 }
 
 fn fetch_json_manifest<T>(url: &str) -> Result<T, String>
