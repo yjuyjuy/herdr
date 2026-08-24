@@ -107,6 +107,10 @@ pub struct PaneSnapshot {
     pub agent_session: Option<PaneAgentSessionSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_argv: Option<Vec<String>>,
+    /// Pid of the pane's shell process, so a later incarnation can reap the
+    /// shell if this process dies without dropping its runtimes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_pid: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -359,6 +363,11 @@ fn capture_tab(
                     value: session.session_ref.value.clone(),
                 })
         });
+        let child_pid = tab
+            .panes
+            .get(id)
+            .and_then(|pane| terminal_runtimes.get(&pane.attached_terminal_id))
+            .and_then(|runtime| runtime.child_pid());
         panes.insert(
             id.raw(),
             PaneSnapshot {
@@ -368,6 +377,7 @@ fn capture_tab(
                 managed_agent_kind,
                 agent_session,
                 launch_argv,
+                child_pid,
             },
         );
     }
@@ -551,6 +561,45 @@ mod tests {
         capture_history(&state.workspaces, terminal_runtimes)
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn capture_persists_live_pane_child_pid() {
+        use std::sync::Arc;
+
+        let state = state_with_workspaces(&["child-pid"]);
+        let root = state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = state.workspaces[0].tabs[0].panes[&root]
+            .attached_terminal_id
+            .clone();
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        let (events, _event_rx) = tokio::sync::mpsc::channel(8);
+        let runtime = crate::terminal::TerminalRuntime::spawn(
+            root,
+            24,
+            80,
+            cwd,
+            0,
+            crate::terminal_theme::TerminalTheme::default(),
+            None,
+            crate::pane::PaneShellConfig::new("/bin/sh", crate::config::ShellModeConfig::NonLogin),
+            &crate::pane::PaneLaunchEnv::default(),
+            events,
+            Arc::new(tokio::sync::Notify::new()),
+            Arc::new(crate::render_signal::RenderSignal::new()),
+        )
+        .expect("spawn test pane shell");
+        let pid = runtime
+            .child_pid()
+            .expect("live pane shell should report a pid");
+        assert!(pid > 0);
+
+        let mut runtimes = TerminalRuntimeRegistry::new();
+        runtimes.insert(terminal_id, runtime);
+        let snap = capture_from_state_with_runtimes(&state, &runtimes);
+        let pane = &snap.workspaces[0].tabs[0].panes[&root.raw()];
+        assert_eq!(pane.child_pid, Some(pid));
+    }
+
     fn root_split_ratio(tab: &TabSnapshot) -> Option<f32> {
         match &tab.layout {
             LayoutSnapshot::Split { ratio, .. } => Some(*ratio),
@@ -648,6 +697,7 @@ mod tests {
                 managed_agent_kind: None,
                 agent_session: None,
                 launch_argv: None,
+                child_pid: None,
             },
         );
         panes.insert(
@@ -659,6 +709,7 @@ mod tests {
                 managed_agent_kind: None,
                 agent_session: None,
                 launch_argv: None,
+                child_pid: None,
             },
         );
 
@@ -1207,6 +1258,7 @@ mod tests {
                 managed_agent_kind: None,
                 agent_session: None,
                 launch_argv: None,
+                child_pid: None,
             },
         );
         panes.insert(
@@ -1220,6 +1272,7 @@ mod tests {
                 managed_agent_kind: None,
                 agent_session: None,
                 launch_argv: None,
+                child_pid: None,
             },
         );
 

@@ -183,6 +183,11 @@ pub fn session_processes(_child_pid: u32) -> Vec<u32> {
 pub fn signal_processes(_pids: &[u32], _signal: Signal) {}
 
 /// Unsupported platform stub.
+pub fn process_is_session_leader(_pid: u32) -> bool {
+    false
+}
+
+/// Unsupported platform stub.
 pub fn process_exists(_pid: u32) -> bool {
     false
 }
