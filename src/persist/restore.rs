@@ -62,6 +62,12 @@ type RestoredTab = (
 type RestoreFailures<T> = (T, usize);
 
 /// Restore workspaces from a snapshot. Each pane gets a fresh shell in its saved cwd.
+///
+/// When the snapshot records a pane shell pid from a previous incarnation and
+/// that incarnation is no longer running, the leftover shell session is
+/// SIGKILLed before the fresh shell is spawned so detached panes cannot leak
+/// processes. Handoff restores (live updates) opt out: the previous server is
+/// still running there and still owns the panes.
 pub fn restore(
     snapshot: &SessionSnapshot,
     history: Option<&SessionHistorySnapshot>,
@@ -85,6 +91,7 @@ pub fn restore(
         crate::pane::PaneShellConfig::new(default_shell, shell_mode),
         resume_agents_on_restore,
         &mut imported_panes,
+        true,
         events,
         render_notify,
         render_dirty,
@@ -111,6 +118,7 @@ pub fn restore_handoff(
         crate::pane::PaneShellConfig::new(default_shell, shell_mode),
         true,
         imports,
+        false,
         events,
         render_notify,
         render_dirty,
@@ -185,6 +193,8 @@ fn collect_layout_snapshot_pane_ids(node: &LayoutSnapshot, ids: &mut Vec<u32>) {
 }
 
 #[cfg(unix)]
+// Private restore spine threading the reap_stale_shells policy flag.
+#[allow(clippy::too_many_arguments)]
 fn restore_with_imports_strict(
     snapshot: &SessionSnapshot,
     history: Option<&SessionHistorySnapshot>,
@@ -194,6 +204,7 @@ fn restore_with_imports_strict(
     shell_config: crate::pane::PaneShellConfig<'_>,
     resume_agents_on_restore: bool,
     imported_panes: &mut HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>,
+    reap_stale_shells: bool,
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<Notify>,
     render_dirty: Arc<RenderSignal>,
@@ -207,6 +218,7 @@ fn restore_with_imports_strict(
         shell_config,
         resume_agents_on_restore,
         imported_panes,
+        reap_stale_shells,
         events,
         render_notify,
         render_dirty,
@@ -225,6 +237,8 @@ fn restore_with_imports_strict(
     Ok(restored)
 }
 
+// Private restore spine threading the reap_stale_shells policy flag.
+#[allow(clippy::too_many_arguments)]
 fn restore_with_imports(
     snapshot: &SessionSnapshot,
     history: Option<&SessionHistorySnapshot>,
@@ -234,6 +248,7 @@ fn restore_with_imports(
     shell_config: crate::pane::PaneShellConfig<'_>,
     resume_agents_on_restore: bool,
     imported_panes: &mut HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>,
+    reap_stale_shells: bool,
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<Notify>,
     render_dirty: Arc<RenderSignal>,
@@ -247,6 +262,7 @@ fn restore_with_imports(
         shell_config,
         resume_agents_on_restore,
         imported_panes,
+        reap_stale_shells,
         events,
         render_notify,
         render_dirty,
@@ -254,6 +270,8 @@ fn restore_with_imports(
     .0
 }
 
+// Private restore spine threading the reap_stale_shells policy flag.
+#[allow(clippy::too_many_arguments)]
 fn restore_with_imports_and_failures(
     snapshot: &SessionSnapshot,
     history: Option<&SessionHistorySnapshot>,
@@ -263,6 +281,7 @@ fn restore_with_imports_and_failures(
     shell_config: crate::pane::PaneShellConfig<'_>,
     resume_agents_on_restore: bool,
     imported_panes: &mut HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>,
+    reap_stale_shells: bool,
     events: mpsc::Sender<AppEvent>,
     render_notify: Arc<Notify>,
     render_dirty: Arc<RenderSignal>,
@@ -289,6 +308,7 @@ fn restore_with_imports_and_failures(
             &runtime_context,
             &mut resumed_agent_sessions,
             imported_panes,
+            reap_stale_shells,
         );
         failed_imports += workspace_failed_imports;
         if let Some((workspace, restored_terminals, restored_runtimes)) = restored {
@@ -311,6 +331,7 @@ fn restore_workspace(
     runtime_context: &RestoreRuntimeContext<'_>,
     resumed_agent_sessions: &mut HashSet<String>,
     imported_panes: &mut HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>,
+    reap_stale_shells: bool,
 ) -> RestoreFailures<Option<RestoredWorkspace>> {
     let mut tabs = Vec::new();
     let mut terminals = Vec::new();
@@ -365,6 +386,7 @@ fn restore_workspace(
             runtime_context,
             resumed_agent_sessions,
             imported_panes,
+            reap_stale_shells,
             &public_pane_ids_by_old_raw,
         );
         failed_imports += tab_failed_imports;
@@ -453,6 +475,7 @@ fn restore_tab(
     runtime_context: &RestoreRuntimeContext<'_>,
     resumed_agent_sessions: &mut HashSet<String>,
     imported_panes: &mut HashMap<u32, crate::handoff_runtime::ImportedHandoffRuntime>,
+    reap_stale_shells: bool,
     public_pane_ids_by_old_raw: &HashMap<u32, String>,
 ) -> RestoreFailures<Option<RestoredTab>> {
     let (node, id_map) = restore_node_remapped(&snap.layout);
@@ -528,6 +551,11 @@ fn restore_tab(
             .unwrap_or_default();
         let imported_runtime = old_pane_id.and_then(|old_id| imported_panes.remove(&old_id));
         let was_imported = imported_runtime.is_some();
+        if reap_stale_shells && !was_imported {
+            if let Some(stale_pid) = saved_pane.and_then(|pane| pane.child_pid) {
+                crate::pane::reap_stale_pane_processes(*id, stale_pid);
+            }
+        }
         let pending_native_agent_restore = if was_imported {
             None
         } else {
@@ -1198,6 +1226,7 @@ mod tests {
                                 value: "opencode-session".into(),
                             }),
                             launch_argv: None,
+                            child_pid: None,
                         },
                     )]),
                     zoomed: false,
@@ -1279,6 +1308,7 @@ mod tests {
                                 managed_agent_kind: None,
                                 agent_session: None,
                                 launch_argv: None,
+                                child_pid: None,
                             },
                         ),
                         (
@@ -1290,6 +1320,7 @@ mod tests {
                                 managed_agent_kind: None,
                                 agent_session: None,
                                 launch_argv: None,
+                                child_pid: None,
                             },
                         ),
                     ]),
@@ -1343,6 +1374,7 @@ mod tests {
                     managed_agent_kind: None,
                     agent_session: None,
                     launch_argv: None,
+                    child_pid: None,
                 },
             )
         };
@@ -1358,6 +1390,7 @@ mod tests {
                 value: "codex-session".into(),
             }),
             launch_argv: None,
+            child_pid: None,
         };
         let snapshot = SessionSnapshot {
             version: super::super::snapshot::SNAPSHOT_VERSION,
@@ -1509,6 +1542,7 @@ mod tests {
                                 value: "codex-session".into(),
                             }),
                             launch_argv: None,
+                            child_pid: None,
                         },
                     )]),
                     zoomed: false,
@@ -1658,6 +1692,105 @@ mod tests {
         let _ = runtime.try_send_bytes(bytes::Bytes::from_static(b"exit\n"));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn restore_reaps_stale_pane_shell_from_previous_incarnation() {
+        use std::os::unix::process::CommandExt;
+
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+        // Simulate a pane shell leaked by a previous incarnation: a live
+        // session leader that the previous server died without dropping. The
+        // guard does not require ppid to be 1, so a direct child is enough.
+        let mut stale = unsafe {
+            std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg("sleep 60")
+                .pre_exec(|| {
+                    libc::setsid();
+                    Ok(())
+                })
+                .spawn()
+        }
+        .expect("spawn stale shell session");
+        let stale_pid = stale.id();
+        assert!(crate::platform::process_is_session_leader(stale_pid));
+
+        let mut panes = HashMap::new();
+        panes.insert(
+            0,
+            super::super::snapshot::PaneSnapshot {
+                cwd: cwd.clone(),
+                label: None,
+                agent_name: None,
+                managed_agent_kind: None,
+                agent_session: None,
+                launch_argv: None,
+                child_pid: Some(stale_pid),
+            },
+        );
+        let snapshot = SessionSnapshot {
+            version: super::super::snapshot::SNAPSHOT_VERSION,
+            workspaces: vec![WorkspaceSnapshot {
+                id: Some("w-stale".into()),
+                custom_name: None,
+                identity_cwd: cwd.clone(),
+                worktree_space: None,
+                public_pane_numbers: HashMap::from([(0, 1)]),
+                next_public_pane_number: 2,
+                public_tab_numbers: vec![1],
+                next_public_tab_number: 2,
+                tabs: vec![TabSnapshot {
+                    custom_name: None,
+                    layout: LayoutSnapshot::Pane(0),
+                    panes,
+                    zoomed: false,
+                    focused: Some(0),
+                    root_pane: Some(0),
+                }],
+                active_tab: 0,
+            }],
+            active: Some(0),
+            selected: 0,
+            sidebar_width: None,
+            sidebar_section_split: None,
+            collapsed_space_keys: Default::default(),
+        };
+
+        let (events, _event_rx) = mpsc::channel(8);
+        let (_workspaces, _terminals, runtimes) = restore(
+            &snapshot,
+            None,
+            5,
+            40,
+            4096,
+            test_restore_shell(),
+            crate::config::ShellModeConfig::NonLogin,
+            false,
+            events,
+            Arc::new(Notify::new()),
+            Arc::new(RenderSignal::new()),
+        );
+
+        // The stale shell session must be SIGKILLed by the restore pass.
+        // Reap our direct child's zombie first so process_exists reflects
+        // final death.
+        let _ = stale.wait();
+        assert!(
+            !crate::platform::process_exists(stale_pid),
+            "restore should hard-kill the stale shell from the previous incarnation"
+        );
+        assert_eq!(runtimes.len(), 1, "restore should respawn the pane shell");
+        let fresh = runtimes.values().next().expect("fresh pane runtime");
+        let fresh_pid = fresh
+            .child_pid()
+            .expect("fresh pane shell should report a pid");
+        assert!(fresh_pid > 0);
+        assert_ne!(
+            fresh_pid, stale_pid,
+            "fresh shell must be a new process, not the reaped stale one"
+        );
+    }
+
     fn snapshot_with_saved_pane_history() -> (SessionSnapshot, SessionHistorySnapshot) {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
         let mut panes = HashMap::new();
@@ -1670,6 +1803,7 @@ mod tests {
                 managed_agent_kind: None,
                 agent_session: None,
                 launch_argv: None,
+                child_pid: None,
             },
         );
         let history = SessionHistorySnapshot {

@@ -1326,6 +1326,60 @@ fn shutdown_pane_processes(
     );
 }
 
+/// Whether a saved pane pid is a stale shell from a previous incarnation that
+/// can be safely hard-killed.
+///
+/// Pane shells are spawned as session leaders (portable-pty calls setsid), so
+/// a survivor of a dead owner keeps `sid == pid`. The pid is only reaped
+/// while it is still alive and still that session leader, which also rules
+/// out pids recycled by unrelated processes.
+pub(crate) fn stale_pane_process_reapable(child_pid: u32) -> bool {
+    if child_pid == 0 || child_pid > i32::MAX as u32 {
+        return false;
+    }
+    if !crate::platform::process_exists(child_pid) {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        crate::platform::process_is_session_leader(child_pid)
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+/// Hard-kill a pane session left behind by a dead previous incarnation.
+///
+/// When the server process that owned a pane dies without dropping its
+/// runtimes (crash, SIGKILL, session teardown), the pane shell is reparented
+/// to the init process and outlives its PTY: interactive shells ignore
+/// SIGHUP/SIGTERM, so a soft signal will not clear the leak. The next
+/// incarnation restores the pane, spawns a fresh shell, and must SIGKILL the
+/// old session here or the shell and its children (p10k workers, agent
+/// processes) leak forever.
+pub(crate) fn reap_stale_pane_processes(pane_id: PaneId, child_pid: u32) {
+    if !stale_pane_process_reapable(child_pid) {
+        return;
+    }
+
+    let mut pids = crate::platform::session_processes(child_pid);
+    if pids.is_empty() {
+        pids.push(child_pid);
+    }
+    pids.sort_unstable();
+    pids.dedup();
+
+    crate::platform::signal_processes(&pids, crate::platform::Signal::Kill);
+    info!(
+        pane = pane_id.raw(),
+        pid = child_pid,
+        pids = ?pids,
+        "reaped stale pane session from previous incarnation"
+    );
+}
+
 #[cfg(unix)]
 fn truncate_handoff_history(history: String, max_bytes: usize) -> String {
     if history.len() <= max_bytes {
@@ -3167,6 +3221,76 @@ mod tests {
     #[test]
     fn shutdown_liveness_treats_missing_process_as_gone() {
         assert!(!process_alive_for_shutdown(43, 42, false, |_| false));
+    }
+
+    #[test]
+    fn stale_pane_reap_skips_zero_and_impossible_pids() {
+        assert!(!stale_pane_process_reapable(0));
+        assert!(
+            !stale_pane_process_reapable(u32::MAX),
+            "a pid that cannot belong to a live process must never be reaped"
+        );
+        assert!(
+            !stale_pane_process_reapable(i32::MAX as u32 + 1),
+            "pids above the pid_t range must never reach kill(2), where an overflow cast would broadcast"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_pane_reap_skips_live_process_in_current_session() {
+        let mut child = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("sleep 30")
+            .spawn()
+            .expect("spawn test child");
+        let pid = child.id();
+        assert!(crate::platform::process_exists(pid));
+        assert!(
+            !stale_pane_process_reapable(pid),
+            "a process that shares our session is not a leaked pane shell"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_pane_reap_terminates_session_leader_process() {
+        use std::os::unix::process::CommandExt;
+
+        let mut child = unsafe {
+            std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg("sleep 60 & wait")
+                .pre_exec(|| {
+                    libc::setsid();
+                    Ok(())
+                })
+                .spawn()
+        }
+        .expect("spawn session leader child");
+        let pid = child.id();
+        assert!(crate::platform::process_is_session_leader(pid));
+        assert!(stale_pane_process_reapable(pid));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while crate::platform::session_processes(pid).len() < 2
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            crate::platform::session_processes(pid).len() >= 2,
+            "background job should share the stale session"
+        );
+
+        reap_stale_pane_processes(PaneId::from_raw(1234), pid);
+
+        let _ = child.wait();
+        assert!(
+            !crate::platform::process_exists(pid),
+            "reap should hard-kill the stale session leader"
+        );
     }
 
     #[cfg(unix)]

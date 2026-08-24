@@ -961,6 +961,15 @@ fn collect_positive_pids(pids: Vec<libc::pid_t>, count: usize) -> Vec<u32> {
         .collect()
 }
 
+/// Whether the process is still the leader of its own session.
+///
+/// Pane shells are spawned as session leaders (portable-pty calls setsid), so
+/// a leaked shell from a dead incarnation keeps `sid == pid`.
+pub fn process_is_session_leader(pid: u32) -> bool {
+    let session_id = unsafe { libc::getsid(pid as libc::c_int) };
+    session_id > 0 && session_id == pid as libc::c_int
+}
+
 pub fn signal_processes(pids: &[u32], signal: Signal) {
     let sig = match signal {
         Signal::Hangup => libc::SIGHUP,
