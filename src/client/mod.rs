@@ -114,6 +114,7 @@ struct AttachEscapeState {
 #[cfg(unix)]
 enum AttachInputAction {
     Forward(Vec<u8>),
+    ForwardAfterPendingPrefix(Vec<u8>),
     Scroll {
         source: AttachScrollSource,
         direction: AttachScrollDirection,
@@ -135,6 +136,14 @@ impl AttachEscapeState {
         mouse_scroll_lines: usize,
     ) -> AttachInputAction {
         const PREFIX: u8 = 0x02; // Ctrl+B
+
+        if crate::raw_input::is_complete_text_bracketed_paste(&data) {
+            return if std::mem::take(&mut self.pending_prefix) {
+                AttachInputAction::ForwardAfterPendingPrefix(data)
+            } else {
+                AttachInputAction::Forward(data)
+            };
+        }
 
         let mut output = Vec::with_capacity(data.len());
         for byte in data {
@@ -348,11 +357,11 @@ fn setup_terminal(mouse_capture: bool) -> io::Result<TerminalGuard> {
 
 /// Sets up a direct attach terminal.
 ///
-/// Direct attach forwards stdin to the attached PTY. It enables mouse capture
-/// so wheel events can drive the attached viewport or be forwarded to child
+/// Direct attach forwards stdin to the attached PTY. When configured, mouse
+/// capture lets wheel events drive the attached viewport or reach child
 /// programs that requested mouse input.
-fn setup_direct_attach_terminal() -> io::Result<TerminalGuard> {
-    setup_terminal_with_capabilities(false, true)
+fn setup_direct_attach_terminal(mouse_capture: bool) -> io::Result<TerminalGuard> {
+    setup_terminal_with_capabilities(false, mouse_capture)
 }
 
 fn setup_terminal_with_capabilities(
@@ -384,6 +393,7 @@ fn setup_terminal_with_capabilities(
         } else {
             set_mouse_capture(false, false)?;
         }
+        execute!(io::stdout(), EnableBracketedPaste)?;
     }
 
     #[cfg(windows)]
@@ -421,6 +431,7 @@ fn setup_terminal_with_capabilities(
     Ok(TerminalGuard {
         reset_modify_other_keys: modify_other_keys_mode.is_some(),
         reset_host_color_scheme_reports: host_color_scheme_reports,
+        restored: false,
         #[cfg(windows)]
         restore_windows_input_mode: windows_virtual_terminal_input.restore_mode,
     })
@@ -434,6 +445,7 @@ fn should_enable_host_color_scheme_reports(enable_client_protocols: bool) -> boo
 struct TerminalGuard {
     reset_modify_other_keys: bool,
     reset_host_color_scheme_reports: bool,
+    restored: bool,
     #[cfg(windows)]
     restore_windows_input_mode: Option<u32>,
 }
@@ -582,7 +594,7 @@ fn restore_terminal_state(
     reset_modify_other_keys: bool,
     reset_host_color_scheme_reports: bool,
     #[cfg(windows)] restore_windows_input_mode: Option<u32>,
-) {
+) -> io::Result<()> {
     let _ = clear_received_kitty_graphics(&mut io::stdout());
 
     // Reset modifyOtherKeys if we enabled it.
@@ -606,13 +618,16 @@ fn restore_terminal_state(
         restore_windows_input_mode_value(mode);
     }
 
-    let _ = ratatui::try_restore();
-    let _ = write_terminal_restore_postlude(&mut io::stdout(), reset_host_color_scheme_reports);
+    let restore_result = ratatui::try_restore();
+    let postlude_result =
+        write_terminal_restore_postlude(&mut io::stdout(), reset_host_color_scheme_reports);
 
     #[cfg(windows)]
     if windows_vti_input_backend_enabled() && windows_win32_input_mode_enabled() {
         let _ = disable_windows_win32_input_mode(&mut io::stdout());
     }
+
+    restore_result.and(postlude_result)
 }
 
 #[cfg(not(windows))]
@@ -657,14 +672,28 @@ fn disable_windows_win32_input_mode(writer: &mut impl std::io::Write) -> io::Res
     writer.flush()
 }
 
-impl Drop for TerminalGuard {
-    fn drop(&mut self) {
+impl TerminalGuard {
+    fn restore(mut self) -> io::Result<()> {
+        self.restored = true;
         restore_terminal_state(
             self.reset_modify_other_keys,
             self.reset_host_color_scheme_reports,
             #[cfg(windows)]
             self.restore_windows_input_mode,
-        );
+        )
+    }
+}
+
+impl Drop for TerminalGuard {
+    fn drop(&mut self) {
+        if !self.restored {
+            let _ = restore_terminal_state(
+                self.reset_modify_other_keys,
+                self.reset_host_color_scheme_reports,
+                #[cfg(windows)]
+                self.restore_windows_input_mode,
+            );
+        }
     }
 }
 
@@ -1265,7 +1294,7 @@ fn run_client_with_mode(
     // so we don't leave the terminal in raw mode if the server rejects us.
     let direct_attach = attach_escape.is_some();
     let terminal_guard = if direct_attach {
-        setup_direct_attach_terminal()
+        setup_direct_attach_terminal(mouse_capture)
     } else {
         setup_terminal(mouse_capture)
     }
@@ -1281,7 +1310,7 @@ fn run_client_with_mode(
     let panic_restore_windows_input_mode = terminal_guard.restore_windows_input_mode;
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        restore_terminal_state(
+        let _ = restore_terminal_state(
             panic_resets_modify_other_keys,
             panic_resets_host_color_scheme_reports,
             #[cfg(windows)]
@@ -1323,19 +1352,22 @@ fn run_client_with_mode(
     });
 
     // Restore the terminal before printing any final status message.
-    drop(terminal_guard);
+    let terminal_restore_failed = terminal_guard.restore().is_err();
 
     if let Err(err) = result {
-        eprintln!("herdr: {err}");
+        let _ = writeln!(io::stderr(), "herdr: {err}");
         rt.shutdown_timeout(Duration::from_millis(100));
         crate::logging::shutdown("client");
 
-        if matches!(
-            err,
+        let detached = matches!(
+            &err,
             ClientError::ServerShutdown {
                 reason: Some(reason)
             } if reason == "detached"
-        ) {
+        );
+        let connection_lost_during_terminal_hangup =
+            terminal_restore_failed && matches!(&err, ClientError::ConnectionLost(_));
+        if detached || connection_lost_during_terminal_hangup {
             return Ok(());
         }
 
@@ -1506,6 +1538,13 @@ async fn run_client_loop(
                         state.mouse_scroll_lines,
                     ) {
                         AttachInputAction::Forward(data) => data,
+                        AttachInputAction::ForwardAfterPendingPrefix(data) => {
+                            let prefix = ClientMessage::Input { data: vec![0x02] };
+                            if let Err(e) = write_to_server(&mut write_stream, &prefix) {
+                                return Err(ClientError::ConnectionLost(e));
+                            }
+                            data
+                        }
                         AttachInputAction::Scroll {
                             source,
                             direction,
@@ -2549,7 +2588,9 @@ fn should_query_host_terminal_theme() -> bool {
 }
 
 fn write_host_terminal_theme_query(mut writer: impl io::Write) -> io::Result<()> {
-    let query = crate::terminal_theme::host_terminal_theme_query_sequence();
+    let query = crate::terminal_theme::host_terminal_theme_query_sequence(
+        crate::platform::should_query_host_terminal_palette(),
+    );
     writer.write_all(query.as_bytes())?;
     writer.flush()
 }
@@ -2977,7 +3018,10 @@ mod tests {
         write_host_terminal_theme_query(&mut output).unwrap();
         assert_eq!(
             output,
-            crate::terminal_theme::host_terminal_theme_query_sequence().as_bytes()
+            crate::terminal_theme::host_terminal_theme_query_sequence(
+                crate::platform::should_query_host_terminal_palette(),
+            )
+            .as_bytes()
         );
         assert!(!output
             .windows(crate::terminal_theme::HOST_COLOR_SCHEME_QUERY_SEQUENCE.len())
@@ -3104,6 +3148,38 @@ mod tests {
             AttachInputAction::Forward(bytes) => assert_eq!(bytes, vec![0x02]),
             other => panic!("expected forwarded prefix, got {other:?}"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn attach_escape_does_not_interpret_bracketed_paste_contents() {
+        let mut escape = AttachEscapeState::default();
+        let paste = b"\x1b[200~one\x02q\ntwo\x1b[201~".to_vec();
+
+        match escape.filter_input(paste.clone(), 24, 3) {
+            AttachInputAction::Forward(bytes) => assert_eq!(bytes, paste),
+            other => panic!("expected opaque paste, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn attach_escape_flushes_pending_prefix_before_bracketed_paste() {
+        let mut escape = AttachEscapeState::default();
+        let paste = b"\x1b[200~one\ntwo\x1b[201~".to_vec();
+        assert!(matches!(
+            escape.filter_input(vec![0x02], 24, 3),
+            AttachInputAction::None
+        ));
+
+        assert!(matches!(
+            escape.filter_input(paste.clone(), 24, 3),
+            AttachInputAction::ForwardAfterPendingPrefix(bytes) if bytes == paste
+        ));
+        assert!(matches!(
+            escape.filter_input(vec![b'q'], 24, 3),
+            AttachInputAction::Forward(bytes) if bytes == b"q"
+        ));
     }
 
     #[cfg(unix)]

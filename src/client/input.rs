@@ -92,9 +92,6 @@ fn unix_stdin_reader_loop(
     if host_cell_size_query_sent {
         framer.host_cell_size_query_sent();
     }
-    if host_cell_size_query_sent {
-        framer.host_cell_size_query_sent();
-    }
     let mut pending_palette = Vec::new();
     let mut pending_mode = None;
     let mut last_geometry = None;
