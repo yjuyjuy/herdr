@@ -1459,6 +1459,29 @@ mod tests {
             .expect("failed to open pty")
     }
 
+    /// Skip a foreground-job test when the kernel does not expose
+    /// `/proc/<pid>/task/<tid>/children`.
+    ///
+    /// Returns `true` when the caller should return early. The reason is
+    /// printed so a skipped run always names the missing capability.
+    #[cfg(target_os = "linux")]
+    #[track_caller]
+    fn skip_unless_proc_task_children() -> bool {
+        if crate::platform::proc_task_children_available() {
+            return false;
+        }
+
+        println!(
+            "SKIP {}: kernel does not expose /proc/<pid>/task/<tid>/children \
+             (CONFIG_PROC_CHILDREN is off). Foreground-job detection walks the \
+             process tree through that file, so this assertion cannot run here. \
+             CI runs it on ubuntu-latest, where the file exists. See the \
+             \"Running the tests in a container\" section of CONTRIBUTING.md.",
+            std::panic::Location::caller(),
+        );
+        true
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn foreground_job_detects_sleep() {
@@ -1531,6 +1554,10 @@ mod tests {
     #[test]
     fn foreground_job_detects_agent_behind_shell_wrapper() {
         use portable_pty::CommandBuilder;
+
+        if skip_unless_proc_task_children() {
+            return;
+        }
 
         let pair = open_test_pty();
 

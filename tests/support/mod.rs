@@ -86,6 +86,98 @@ pub fn cleanup_test_base(base: &Path) {
     let _ = fs::remove_dir_all(base);
 }
 
+/// Environment variables an ambient Herdr session exports into every pane it
+/// owns. Integration tests spawn their own server against their own config and
+/// socket paths, so inheriting any of these makes the child resolve a different
+/// session directory than the test asserts on.
+pub const AMBIENT_SESSION_ENV_VARS: &[&str] = &[
+    "HERDR_SESSION",
+    "HERDR_ENV",
+    "HERDR_SOCKET_PATH",
+    "HERDR_CLIENT_SOCKET_PATH",
+    "HERDR_WORKSPACE_ID",
+    "HERDR_TAB_ID",
+    "HERDR_PANE_ID",
+    "HERDR_AGENT",
+];
+
+/// Build a PTY command for the test binary with no ambient Herdr session
+/// variables inherited.
+///
+/// When the suite itself runs inside a Herdr pane, the host session exports its
+/// identity and socket overrides into the test process. A spawned server would
+/// then resolve the host session directory instead of the per-test one. Every
+/// test that spawns the Herdr binary through a PTY must build its command here
+/// so the isolation cannot be forgotten; per-test `env` calls made afterwards
+/// still win.
+pub fn herdr_pty_command(program: &str) -> portable_pty::CommandBuilder {
+    let mut command = portable_pty::CommandBuilder::new(program);
+    for key in AMBIENT_SESSION_ENV_VARS {
+        command.env_remove(key);
+    }
+    command
+}
+
+/// Build a `std::process::Command` for the test binary with no ambient Herdr
+/// session variables inherited. See [`herdr_pty_command`].
+pub fn herdr_command(program: &str) -> std::process::Command {
+    let mut command = std::process::Command::new(program);
+    for key in AMBIENT_SESSION_ENV_VARS {
+        command.env_remove(key);
+    }
+    command
+}
+
+/// Whether this kernel exposes `/proc/<pid>/task/<tid>/children`.
+///
+/// Herdr's Linux foreground-job detection walks the process tree through that
+/// file, which only exists when the kernel is built with `CONFIG_PROC_CHILDREN`.
+/// Some container hosts (notably Unraid kernels) ship without it, so the tests
+/// that assert on foreground process trees cannot pass there.
+#[cfg(target_os = "linux")]
+pub fn proc_task_children_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        let pid = std::process::id();
+        fs::read_dir(format!("/proc/{pid}/task"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|entry| entry.path().join("children").exists())
+    })
+}
+
+/// Skip the calling test when `/proc/<pid>/task/<tid>/children` is unavailable.
+///
+/// Returns `true` when the test should return early. The reason is printed so a
+/// skipped run is never silent: the missing capability is named, and so is the
+/// environment where the same assertions do run.
+#[cfg(target_os = "linux")]
+#[track_caller]
+pub fn skip_unless_proc_task_children() -> bool {
+    if proc_task_children_available() {
+        return false;
+    }
+
+    println!(
+        "SKIP {}: kernel does not expose /proc/<pid>/task/<tid>/children \
+         (CONFIG_PROC_CHILDREN is off, kernel {}). Herdr's Linux foreground-job \
+         detection needs it, so this assertion cannot run here. CI runs it on \
+         ubuntu-latest, where the file exists. See the \"Running the tests in a \
+         container\" section of CONTRIBUTING.md.",
+        std::panic::Location::caller(),
+        kernel_release().unwrap_or_else(|| "unknown".to_string()),
+    );
+    true
+}
+
+#[cfg(target_os = "linux")]
+fn kernel_release() -> Option<String> {
+    fs::read_to_string("/proc/sys/kernel/osrelease")
+        .ok()
+        .map(|value| value.trim().to_string())
+}
+
 pub fn wait_for_socket(path: &Path, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -742,6 +834,51 @@ mod tests {
         assert!(
             !is_test_herdr_binary(Path::new("/home/can/.local/bin/herdr")),
             "installed binaries must not be considered test-owned"
+        );
+    }
+
+    /// Every test that launches the Herdr binary must build its command through
+    /// [`herdr_pty_command`] or [`herdr_command`], which strip the ambient
+    /// session variables. Constructing the command directly makes the spawned
+    /// server inherit the host session when the suite runs inside a Herdr pane,
+    /// which silently redirects it to the wrong session directory.
+    #[test]
+    fn test_binaries_launch_herdr_through_the_env_isolating_constructors() {
+        let tests_dir = current_checkout_root().join("tests");
+        let forbidden = [
+            "CommandBuilder::new(env!(\"CARGO_BIN_EXE_herdr\"))",
+            "Command::new(env!(\"CARGO_BIN_EXE_herdr\"))",
+        ];
+
+        let mut offenders = Vec::new();
+        let mut pending = vec![tests_dir];
+        while let Some(dir) = pending.pop() {
+            for entry in fs::read_dir(&dir).expect("tests directory should be readable") {
+                let path = entry
+                    .expect("test directory entry should be readable")
+                    .path();
+                if path.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                    continue;
+                }
+
+                let source = fs::read_to_string(&path).expect("test source should be readable");
+                for (index, line) in source.lines().enumerate() {
+                    if forbidden.iter().any(|pattern| line.contains(pattern)) {
+                        offenders.push(format!("{}:{}", path.display(), index + 1));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "these sites launch the Herdr binary without clearing the ambient \
+             session environment; use support::herdr_pty_command or \
+             support::herdr_command instead: {offenders:?}"
         );
     }
 }

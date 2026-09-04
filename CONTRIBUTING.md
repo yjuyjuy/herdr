@@ -119,6 +119,33 @@ just ci
 
 The checks must pass. Make sure the tests exercise the reported failure and would fail without the fix.
 
+#### Running the tests in a container
+
+The suite spawns real Herdr servers on real PTYs, so a few tests depend on the host kernel and on a clean environment.
+Two container-specific effects are worth knowing about before you debug a red run.
+
+First, the suite must not inherit an ambient Herdr session.
+When you run the tests from inside a Herdr pane, that pane exports `HERDR_SESSION`, `HERDR_SOCKET_PATH`, and the workspace, tab, and pane identifiers.
+A spawned server that inherits them resolves the host session directory instead of the per-test one, and the test then asserts on paths the server never wrote to.
+Every test therefore builds its command through `support::herdr_pty_command` or `support::herdr_command`, which strip those variables.
+The `test_binaries_launch_herdr_through_the_env_isolating_constructors` test fails if a new call site constructs the command directly, so keep using the helpers.
+
+Second, foreground-job detection needs `/proc/<pid>/task/<tid>/children`.
+The kernel only provides that file when it is built with `CONFIG_PROC_CHILDREN`, and some container hosts, notably Unraid kernels, ship without it.
+Herdr walks the process tree through that file to find the foreground job of a pane, so the tests that assert on multi-process foreground jobs cannot pass there.
+Those tests skip themselves and print a `SKIP` line that names the missing capability, the kernel release, and this section.
+A skip is never silent: if you see a `SKIP` line, the assertion did not run, and it still has to pass somewhere else before the change is complete.
+
+Check whether the current machine has the capability with:
+
+```bash
+ls /proc/self/task/*/children
+```
+
+If that prints nothing, run the affected tests on a host with a stock distribution kernel, or in a container on such a host.
+GitHub Actions runs the full suite on `ubuntu-latest`, where the file exists, so a pull request still gets complete coverage.
+Everything else in the suite passes in a container, including as root.
+
 ### Handle documentation correctly
 
 For normal code changes, do not edit the root `README.md`, root `CHANGELOG.md`, `docs/preview/`, `docs/versions/`, or generated files under `website/src/content/docs/`.

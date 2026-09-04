@@ -2,7 +2,11 @@
 
 use std::os::fd::{FromRawFd, OwnedFd};
 use std::os::unix::process::ExitStatusExt;
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
+
+mod support;
+
+use support::herdr_command;
 
 fn closed_pipe_writer() -> Stdio {
     let mut fds = [-1; 2];
@@ -16,7 +20,7 @@ fn closed_pipe_writer() -> Stdio {
 }
 
 fn run_with_closed_stdout(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_herdr"))
+    herdr_command(env!("CARGO_BIN_EXE_herdr"))
         .args(args)
         .stdout(closed_pipe_writer())
         .stderr(Stdio::piped())
