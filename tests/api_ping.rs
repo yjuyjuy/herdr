@@ -9,9 +9,11 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use portable_pty::{native_pty_system, Child, MasterPty, PtySize};
+#[cfg(target_os = "linux")]
+use support::skip_unless_proc_task_children;
 use support::{
     cleanup_test_base, herdr_pty_command, register_runtime_dir, register_spawned_herdr_pid,
-    skip_unless_proc_task_children, unregister_spawned_herdr_pid,
+    unregister_spawned_herdr_pid,
 };
 
 fn unique_test_dir() -> PathBuf {
