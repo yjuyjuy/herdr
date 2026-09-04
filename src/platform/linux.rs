@@ -290,6 +290,24 @@ fn process_task_ids(pid: u32) -> Vec<u32> {
         .collect()
 }
 
+/// Whether this kernel exposes `/proc/<pid>/task/<tid>/children`.
+///
+/// Foreground-job detection walks the process tree through that file, which the
+/// kernel only provides when built with `CONFIG_PROC_CHILDREN`. Tests that
+/// assert on multi-process foreground jobs use this to report a named skip
+/// instead of an unexplained failure.
+#[cfg(test)]
+pub(crate) fn proc_task_children_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        std::fs::read_dir(format!("/proc/{}/task", std::process::id()))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|entry| entry.path().join("children").exists())
+    })
+}
+
 fn process_task_children(pid: u32, tid: u32) -> Vec<u32> {
     let Some(children) = std::fs::read_to_string(format!("/proc/{pid}/task/{tid}/children")).ok()
     else {

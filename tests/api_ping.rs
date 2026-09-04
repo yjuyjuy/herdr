@@ -8,10 +8,10 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, Child, MasterPty, PtySize};
 use support::{
-    cleanup_test_base, register_runtime_dir, register_spawned_herdr_pid,
-    unregister_spawned_herdr_pid,
+    cleanup_test_base, herdr_pty_command, register_runtime_dir, register_spawned_herdr_pid,
+    skip_unless_proc_task_children, unregister_spawned_herdr_pid,
 };
 
 fn unique_test_dir() -> PathBuf {
@@ -138,7 +138,7 @@ fn spawn_herdr_with_options(
         })
         .unwrap();
 
-    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    let mut cmd = herdr_pty_command(env!("CARGO_BIN_EXE_herdr"));
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
@@ -716,6 +716,10 @@ fn tab_methods_round_trip_over_socket() {
 #[cfg(target_os = "linux")]
 #[test]
 fn pane_info_reports_foreground_cwd_without_changing_pane_cwd() {
+    if skip_unless_proc_task_children() {
+        return;
+    }
+
     let _lock = test_lock();
     let base = unique_test_dir();
     let foreground = base.join("foreground-process");
@@ -874,6 +878,10 @@ fn pane_info_reports_foreground_cwd_without_changing_pane_cwd() {
 #[cfg(target_os = "linux")]
 #[test]
 fn new_terminal_cwd_follow_ignores_nonleader_group_member_cwd() {
+    if skip_unless_proc_task_children() {
+        return;
+    }
+
     let _lock = test_lock();
     let base = unique_test_dir();
     let helper_cwd = base.join("plugin-cache");

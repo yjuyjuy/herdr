@@ -11,12 +11,13 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, Child, MasterPty, PtySize};
 use serde_json::Value;
 use support::{
-    cleanup_test_base, client_handshake, drain_messages, read_server_message, register_runtime_dir,
-    register_spawned_herdr_pid, send_detach, send_input, unregister_spawned_herdr_pid,
-    wait_for_disconnect, wait_for_message_variant, wait_for_socket, wait_until, CURRENT_PROTOCOL,
+    cleanup_test_base, client_handshake, drain_messages, herdr_pty_command, read_server_message,
+    register_runtime_dir, register_spawned_herdr_pid, send_detach, send_input,
+    unregister_spawned_herdr_pid, wait_for_disconnect, wait_for_message_variant, wait_for_socket,
+    wait_until, CURRENT_PROTOCOL,
 };
 
 const CUSTOM_HEADLESS_SIZE_CONFIG: &str = r#"onboarding = false
@@ -118,7 +119,7 @@ fn spawn_server_with_config(
         })
         .unwrap();
 
-    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_herdr"));
+    let mut cmd = herdr_pty_command(env!("CARGO_BIN_EXE_herdr"));
     cmd.arg("server");
     cmd.env("XDG_CONFIG_HOME", config_home);
     cmd.env("XDG_RUNTIME_DIR", runtime_dir);
